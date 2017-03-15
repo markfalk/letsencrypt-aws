@@ -1,4 +1,5 @@
 import datetime
+import errno
 import json
 import os
 import sys
@@ -23,6 +24,8 @@ import rfc3986
 
 
 DEFAULT_ACME_DIRECTORY_URL = "https://acme-v01.api.letsencrypt.org/directory"
+# Staging URL below (higher rate limits = better for testing)
+DEFAULT_ACME_DIRECTORY_URL = "https://acme-staging.api.letsencrypt.org/directory"  # @IgnorePep8
 CERTIFICATE_EXPIRATION_THRESHOLD = datetime.timedelta(days=45)
 # One day
 PERSISTENT_SLEEP_INTERVAL = 60 * 60 * 24
@@ -129,6 +132,44 @@ class ELBCertificate(object):
             SSLCertificateId=new_cert_arn,
             LoadBalancerPort=self.elb_port,
         )
+
+
+class FSCertificate(object):
+    def __init__(self, fs_path, cert_name):
+        self.fs_path = fs_path
+        self.elb_name = cert_name
+
+    def get_current_certificate(self):
+        try:
+            cert_file_handle = open(self.fs_path)
+            cert_file_data = cert_file_handle.read()
+            cert_file_handle.close()
+            return x509.load_pem_x509_certificate(
+                cert_file_data,
+                default_backend(),
+            )
+        except IOError as e:
+            if e.errno == errno.ENOENT:
+                return None
+            else:
+                raise e
+
+    def update_certificate(self, logger, hosts, private_key, pem_certificate,
+                           pem_certificate_chain):
+        logger.emit(
+            "updating-file", fs_path=self.fs_path
+        )
+        CertificateBody = pem_certificate.decode(),
+        CertificateChain = pem_certificate_chain.decode(),
+
+        # Sleep before trying to set the certificate, it appears to sometimes
+        # fail without this.
+        time.sleep(15)
+        logger.emit("updating-file.set-certificate", fs_path=self.fs_path)
+        cert_file_handle = open(self.fs_path, 'w')
+        cert_file_handle.write(CertificateBody[0])
+        cert_chain_file_handle = open(self.fs_path + '.chain', 'w')
+        cert_chain_file_handle.write(CertificateChain[0])
 
 
 class Route53ChallengeCompleter(object):
@@ -511,6 +552,11 @@ def update_certificates(persistent=False, force_issue=False):
             cert_location = ELBCertificate(
                 elb_client, iam_client,
                 domain["elb"]["name"], int(domain["elb"].get("port", 443))
+            )
+        elif "certfilepath" in domain:
+            cert_location = FSCertificate(
+                domain["certfilepath"],
+                os.path.basename(domain["certfilepath"])
             )
         else:
             raise ValueError(

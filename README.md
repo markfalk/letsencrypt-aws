@@ -10,10 +10,11 @@ using the AWS APIs and Let's Encrypt.
 
 ## How it works
 
-`letsencrypt-aws` takes a list of ELBs, and which hosts you want them to be
-able to serve. It runs in a loop and every day does the following:
+`letsencrypt-aws` takes a list of ELBs or filesystem locations, and which
+hosts you want them to be able to serve. It runs in a loop and every day
+does the following:
 
-It gets the certificate for that ELB. If the certificate is going to expire
+It gets the certificate for that ELB or the FS. If the certificate is going to expire
 soon (in less than 45 days), it generates a new private key and CSR and sends a
 request to Let's Encrypt. It takes the DNS challenge and creates a record in
 Route53 for that challenge. This completes the Let's Encrypt challenge and we
@@ -21,7 +22,7 @@ receive a certificate. It uploads the new certificate and private key to IAM
 and updates your ELB to use the certificate.
 
 In theory all you need to do is make sure this is running somewhere, and your
-ELBs' certificates will be kept minty fresh.
+ELBs' certificates will be kept fresh.
 
 ## How to run it
 
@@ -53,7 +54,7 @@ use IAM instance profiles (which are supported, but not mentioned by the
 `letsencrypt-aws` takes it's configuration via the `LETSENCRYPT_AWS_CONFIG`
 environment variable. This should be a JSON object with the following schema:
 
-```json
+``` json
 {
     "domains": [
         {
@@ -61,6 +62,7 @@ environment variable. This should be a JSON object with the following schema:
                 "name": "ELB name (string)",
                 "port": "optional, defaults to 443 (integer)"
             },
+            "certfilepath": "File path of certificates",
             "hosts": ["list of hosts you want on the certificate (strings)"],
             "key_type": "rsa or ecdsa, optional, defaults to rsa (string)"
         }
@@ -113,6 +115,7 @@ The minimum set of permissions needed for `letsencrypt-aws` to work is:
 * `route53:ChangeResourceRecordSets`
 * `route53:GetChange`
 * `route53:ListHostedZones`
+If performing ELB updates (not required for FS updates)
 * `elasticloadbalancing:DescribeLoadBalancers`
 * `elasticloadbalancing:SetLoadBalancerListenerSSLCertificate`
 * `iam:ListServerCertificates`
