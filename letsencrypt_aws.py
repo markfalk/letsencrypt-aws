@@ -31,6 +31,8 @@ CERTIFICATE_EXPIRATION_THRESHOLD = datetime.timedelta(days=45)
 PERSISTENT_SLEEP_INTERVAL = 60 * 60 * 24
 DNS_TTL = 30
 
+certificate_updated = False
+
 
 class Logger(object):
     def __init__(self):
@@ -80,7 +82,7 @@ class ELBCertificate(object):
         self.elb_name = elb_name
         self.elb_port = elb_port
 
-    def get_current_certificate(self):
+    def get_current_certificate(self, logger):
         response = self.elb_client.describe_load_balancers(
             LoadBalancerNames=[self.elb_name]
         )
@@ -102,6 +104,8 @@ class ELBCertificate(object):
 
     def update_certificate(self, logger, hosts, private_key, pem_certificate,
                            pem_certificate_chain):
+        global certificate_updated
+
         logger.emit(
             "updating-elb.upload-iam-certificate", elb_name=self.elb_name
         )
@@ -132,6 +136,7 @@ class ELBCertificate(object):
             SSLCertificateId=new_cert_arn,
             LoadBalancerPort=self.elb_port,
         )
+        certificate_updated = True
 
 
 class FSCertificate(object):
@@ -139,7 +144,7 @@ class FSCertificate(object):
         self.fs_path = fs_path
         self.elb_name = cert_name
 
-    def get_current_certificate(self):
+    def get_current_certificate(self, logger):
         try:
             cert_file_handle = open(self.fs_path)
             cert_file_data = cert_file_handle.read()
@@ -153,23 +158,36 @@ class FSCertificate(object):
                 return None
             else:
                 raise e
+        except ValueError as e:
+            if str(e) == 'Unable to load certificate':
+                logger.emit('updating-file.get_current_certificate',
+                            gen_reason='Unable to load certificate - creating new one')  # @IgnorePep8
+                return None
+            else:
+                raise e
 
     def update_certificate(self, logger, hosts, private_key, pem_certificate,
                            pem_certificate_chain):
+        global certificate_updated
         logger.emit(
             "updating-file", fs_path=self.fs_path
         )
         CertificateBody = pem_certificate.decode(),
         CertificateChain = pem_certificate_chain.decode(),
 
-        # Sleep before trying to set the certificate, it appears to sometimes
-        # fail without this.
-        time.sleep(15)
         logger.emit("updating-file.set-certificate", fs_path=self.fs_path)
-        cert_file_handle = open(self.fs_path, 'w')
-        cert_file_handle.write(CertificateBody[0])
-        cert_chain_file_handle = open(self.fs_path + '.chain', 'w')
-        cert_chain_file_handle.write(CertificateChain[0])
+        private_key_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        with os.fdopen(os.open(self.fs_path + '.key', os.O_WRONLY | os.O_CREAT, 0o600), 'w') as handle:  # @IgnorePep8
+            handle.write(private_key_pem)
+        with os.fdopen(os.open(self.fs_path, os.O_WRONLY | os.O_CREAT), 'w') as handle:  # @IgnorePep8
+            handle.write(CertificateBody[0])
+        with os.fdopen(os.open(self.fs_path + '.chain', os.O_WRONLY | os.O_CREAT), 'w') as handle:  # @IgnorePep8
+            handle.write(CertificateChain[0])
+        certificate_updated = True
 
 
 class Route53ChallengeCompleter(object):
@@ -225,7 +243,7 @@ class Route53ChallengeCompleter(object):
     def create_txt_record(self, host, value):
         zone_id = self._find_zone_id_for_domain(host)
         change_id = self._change_txt_record(
-            "CREATE",
+            "UPSERT",
             zone_id,
             host,
             value,
@@ -253,7 +271,7 @@ class Route53ChallengeCompleter(object):
 
 def generate_rsa_private_key():
     return rsa.generate_private_key(
-        public_exponent=65537, key_size=2048, backend=default_backend()
+        public_exponent=65537, key_size=4096, backend=default_backend()
     )
 
 
@@ -383,7 +401,7 @@ def request_certificate(logger, acme_client, elb_name, authorizations, csr):
 def update_cert(logger, acme_client, force_issue, cert_request):
     logger.emit("updating-elb", elb_name=cert_request.cert_location.elb_name)
 
-    current_cert = cert_request.cert_location.get_current_certificate()
+    current_cert = cert_request.cert_location.get_current_certificate(logger)
     if current_cert is not None:
         logger.emit(
             "updating-elb.certificate-expiration",
@@ -414,6 +432,10 @@ def update_cert(logger, acme_client, force_issue, cert_request):
             sorted(current_domains) == sorted(cert_request.hosts) and
             not force_issue
         ):
+            logger.emit(
+                "updating-elb.certificate-expiration",
+                nogen_reason="certificate not expiring within {}".format(CERTIFICATE_EXPIRATION_THRESHOLD)  # @IgnorePep8
+            )
             return
 
     if cert_request.key_type == "rsa":
@@ -524,6 +546,8 @@ def cli():
     )
 )
 def update_certificates(persistent=False, force_issue=False):
+    global certificate_updated
+
     logger = Logger()
     logger.emit("startup")
 
@@ -586,6 +610,8 @@ def update_certificates(persistent=False, force_issue=False):
             logger, acme_client,
             force_issue, certificate_requests
         )
+    if certificate_updated is False:
+        sys.exit(1)
 
 
 @cli.command()
